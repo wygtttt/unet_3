@@ -44,26 +44,33 @@ def save_colored_mask(mask, filename):
     Image.fromarray(colored_mask).save(filename)
 
 
-def visualize_comparison(vi_img, ir_img, gt_mask, seg_pred, fusion_output, save_path):
+def visualize_comparison(vi_img, ir_img, gt_mask, ir_seg_pred, vi_seg_pred, ir_recon, vi_recon, fusion_output, save_path):
     """
-    将原始图像、真实标签、分割预测结果和融合结果可视化并保存
+    将原始图像、真实标签、分割预测结果、重建结果和融合结果可视化并保存
     
     Args:
         vi_img: 可见光图像, [C, H, W]
         ir_img: 红外图像, [1, H, W]
         gt_mask: 真实标签, [H, W]
-        seg_pred: 分割预测结果, [H, W], 值范围 0-5
+        ir_seg_pred: IR分割预测结果, [H, W], 值范围 0-5
+        vi_seg_pred: VI分割预测结果, [H, W], 值范围 0-5
+        ir_recon: IR重建结果, [1, H, W]
+        vi_recon: VI重建结果, [1, H, W]
         fusion_output: 融合结果, [1, H, W]
         save_path: 保存路径
     """
     # 转换为numpy数组用于可视化
-    vi_img = vi_img.permute(1, 2, 0).cpu().numpy()
+    vi_img = vi_img[0].cpu().numpy()  # VI现在也是单通道
     ir_img = ir_img[0].cpu().numpy()
+    ir_recon = ir_recon[0].cpu().numpy()
+    vi_recon = vi_recon[0].cpu().numpy()
     fusion_output = fusion_output[0].cpu().numpy()
     
     # 归一化图像用于显示
     vi_img = (vi_img - vi_img.min()) / (vi_img.max() - vi_img.min() + 1e-8)
     ir_img = (ir_img - ir_img.min()) / (ir_img.max() - ir_img.min() + 1e-8)
+    ir_recon = (ir_recon - ir_recon.min()) / (ir_recon.max() - ir_recon.min() + 1e-8)
+    vi_recon = (vi_recon - vi_recon.min()) / (vi_recon.max() - vi_recon.min() + 1e-8)
     fusion_output = (fusion_output - fusion_output.min()) / (fusion_output.max() - fusion_output.min() + 1e-8)
     
     # 定义颜色映射
@@ -82,34 +89,54 @@ def visualize_comparison(vi_img, ir_img, gt_mask, seg_pred, fusion_output, save_
     for class_idx in range(6):
         colored_gt_mask[gt_mask == class_idx] = mask_colors[class_idx]
     
-    # 创建彩色分割掩码 - 预测
-    h, w = seg_pred.shape
-    colored_pred_mask = np.zeros((h, w, 3))
+    # 创建彩色分割掩码 - IR预测
+    h, w = ir_seg_pred.shape
+    colored_ir_pred_mask = np.zeros((h, w, 3))
     for class_idx in range(6):
-        colored_pred_mask[seg_pred == class_idx] = mask_colors[class_idx]
+        colored_ir_pred_mask[ir_seg_pred == class_idx] = mask_colors[class_idx]
     
-    # 创建可视化图像 - 5个面板：VI图像、IR图像、GT掩码、预测掩码、融合结果
-    fig, axes = plt.subplots(1, 5, figsize=(25, 5))
+    # 创建彩色分割掩码 - VI预测
+    h, w = vi_seg_pred.shape
+    colored_vi_pred_mask = np.zeros((h, w, 3))
+    for class_idx in range(6):
+        colored_vi_pred_mask[vi_seg_pred == class_idx] = mask_colors[class_idx]
     
-    axes[0].imshow(vi_img)
-    axes[0].set_title('VI Image')
-    axes[0].axis('off')
+    # 创建可视化图像 - 8个面板：原始图像、重建图像、分割结果、融合结果
+    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
     
-    axes[1].imshow(ir_img, cmap='gray')
-    axes[1].set_title('IR Image')
-    axes[1].axis('off')
+    # 第一行：原始图像和重建图像
+    axes[0, 0].imshow(vi_img, cmap='gray')
+    axes[0, 0].set_title('VI Original')
+    axes[0, 0].axis('off')
     
-    axes[2].imshow(colored_gt_mask)
-    axes[2].set_title('Ground Truth')
-    axes[2].axis('off')
+    axes[0, 1].imshow(ir_img, cmap='gray')
+    axes[0, 1].set_title('IR Original')
+    axes[0, 1].axis('off')
     
-    axes[3].imshow(colored_pred_mask)
-    axes[3].set_title('Prediction')
-    axes[3].axis('off')
+    axes[0, 2].imshow(vi_recon, cmap='gray')
+    axes[0, 2].set_title('VI Reconstruction')
+    axes[0, 2].axis('off')
     
-    axes[4].imshow(fusion_output, cmap='gray')
-    axes[4].set_title('Fusion Result')
-    axes[4].axis('off')
+    axes[0, 3].imshow(ir_recon, cmap='gray')
+    axes[0, 3].set_title('IR Reconstruction')
+    axes[0, 3].axis('off')
+    
+    # 第二行：分割结果和融合结果
+    axes[1, 0].imshow(colored_gt_mask)
+    axes[1, 0].set_title('Ground Truth')
+    axes[1, 0].axis('off')
+    
+    axes[1, 1].imshow(colored_ir_pred_mask)
+    axes[1, 1].set_title('IR Segmentation')
+    axes[1, 1].axis('off')
+    
+    axes[1, 2].imshow(colored_vi_pred_mask)
+    axes[1, 2].set_title('VI Segmentation')
+    axes[1, 2].axis('off')
+    
+    axes[1, 3].imshow(fusion_output, cmap='gray')
+    axes[1, 3].set_title('Fusion Result')
+    axes[1, 3].axis('off')
     
     plt.tight_layout()
     plt.savefig(save_path, dpi=200)
@@ -121,7 +148,10 @@ def create_output_dirs(output_base_dir):
     创建输出目录结构
     """
     dirs = {
-        'seg_colored': os.path.join(output_base_dir, 'segmentation_colored'),
+        'ir_seg_colored': os.path.join(output_base_dir, 'ir_segmentation_colored'),
+        'vi_seg_colored': os.path.join(output_base_dir, 'vi_segmentation_colored'),
+        'ir_recon': os.path.join(output_base_dir, 'ir_reconstruction'),
+        'vi_recon': os.path.join(output_base_dir, 'vi_reconstruction'),
         'fusion': os.path.join(output_base_dir, 'fusion'),
         'comparison': os.path.join(output_base_dir, 'comparison')
     }
@@ -154,8 +184,8 @@ def process_batch(model, data_root, output_dir, device):
     ir_files = sorted([f for f in os.listdir(ir_dir) if f.endswith(('.jpg', '.jpeg', '.png', '.tif'))])
     
     # 使用训练时计算的均值和标准差
-    vi_mean = (0.3405778515395395, 0.3637113326614421, 0.33767444875971564)
-    vi_std = (0.14075637061449023, 0.13888050726764334, 0.14433405425755172)
+    vi_mean = (0.5,)  # Y channel typical normalization value
+    vi_std = (0.5,)   # Y channel typical normalization value
     ir_mean = (0.38396125844223883,)
     ir_std = (0.14174455530391647,)
     
@@ -190,7 +220,7 @@ def process_batch(model, data_root, output_dir, device):
         
         # 加载图像
         ir_img = Image.open(ir_path).convert('L')
-        vi_img = Image.open(vi_path).convert('RGB')
+        vi_img = Image.open(vi_path).convert('L')  # VI也转换为灰度图像，因为模型期望1通道输入
         
         # 加载ground truth掩码（如果存在）
         if os.path.exists(mask_path):
@@ -218,15 +248,38 @@ def process_batch(model, data_root, output_dir, device):
             inference_time = t_end - t_start
             total_time += inference_time
             
-            # 处理分割输出
-            seg_output = outputs['seg']
-            seg_pred = seg_output.argmax(1).squeeze(0).cpu().numpy()
+            # 处理IR分割输出
+            ir_seg_output = outputs['ir_seg']
+            ir_seg_pred = ir_seg_output.argmax(1).squeeze(0).cpu().numpy()
+            
+            # 处理VI分割输出
+            vi_seg_output = outputs['vi_seg']
+            vi_seg_pred = vi_seg_output.argmax(1).squeeze(0).cpu().numpy()
+            
+            # 处理重建输出
+            ir_recon_output = outputs['ir_recon'].cpu()
+            vi_recon_output = outputs['vi_recon'].cpu()
             
             # 处理融合输出
             fusion_output = outputs['fusion'].cpu()
         
-        # 保存彩色分割结果
-        save_colored_mask(seg_pred, os.path.join(output_dirs['seg_colored'], f"{file_base}_seg.png"))
+        # 保存IR分割结果
+        save_colored_mask(ir_seg_pred, os.path.join(output_dirs['ir_seg_colored'], f"{file_base}_ir_seg.png"))
+        
+        # 保存VI分割结果
+        save_colored_mask(vi_seg_pred, os.path.join(output_dirs['vi_seg_colored'], f"{file_base}_vi_seg.png"))
+        
+        # 保存IR重建结果
+        ir_recon_img = ir_recon_output.squeeze(0).squeeze(0).numpy()
+        ir_recon_img = (ir_recon_img - ir_recon_img.min()) / (ir_recon_img.max() - ir_recon_img.min()) * 255.0
+        ir_recon_img = ir_recon_img.astype(np.uint8)
+        Image.fromarray(ir_recon_img).save(os.path.join(output_dirs['ir_recon'], f"{file_base}_ir_recon.png"))
+        
+        # 保存VI重建结果
+        vi_recon_img = vi_recon_output.squeeze(0).squeeze(0).numpy()
+        vi_recon_img = (vi_recon_img - vi_recon_img.min()) / (vi_recon_img.max() - vi_recon_img.min()) * 255.0
+        vi_recon_img = vi_recon_img.astype(np.uint8)
+        Image.fromarray(vi_recon_img).save(os.path.join(output_dirs['vi_recon'], f"{file_base}_vi_recon.png"))
         
         # 保存融合结果
         fusion_img = fusion_output.squeeze(0).squeeze(0).numpy()
@@ -235,8 +288,9 @@ def process_batch(model, data_root, output_dir, device):
         Image.fromarray(fusion_img).save(os.path.join(output_dirs['fusion'], f"{file_base}_fusion.png"))
         
         # 保存对比可视化
-        visualize_comparison(vi_tensor[0].cpu(), ir_tensor[0].cpu(), gt_mask, seg_pred, 
-                           fusion_output[0], os.path.join(output_dirs['comparison'], f"{file_base}_comparison.png"))
+        visualize_comparison(vi_tensor[0].cpu(), ir_tensor[0].cpu(), gt_mask, ir_seg_pred, vi_seg_pred,
+                           ir_recon_output[0], vi_recon_output[0], fusion_output[0], 
+                           os.path.join(output_dirs['comparison'], f"{file_base}_comparison.png"))
     
     # 打印平均推理时间
     avg_time = total_time / num_images
@@ -248,7 +302,7 @@ def process_batch(model, data_root, output_dir, device):
 def main():
     # 参数设置
     num_classes = 6  # 0-5共6个类别
-    weights_path = "/ifs/root/ipa01/101/user_101003/Xdj/unet/save_weights/best_dual_model.pth"
+    weights_path = "/ifs/root/ipa01/101/user_101003/Xdj/unet_3/save_weights/best_dual_model.pth"
     data_root = "./postdam"
     output_dir = "./prediction_results"
     
@@ -272,10 +326,13 @@ def main():
     output_dirs = process_batch(model, data_root, output_dir, device)
     
     print(f"预测结果已保存到: {output_dir}")
-    print(f"- 彩色分割结果: {output_dirs['seg_colored']}")
+    print(f"- IR分割结果: {output_dirs['ir_seg_colored']}")
+    print(f"- VI分割结果: {output_dirs['vi_seg_colored']}")
+    print(f"- IR重建结果: {output_dirs['ir_recon']}")
+    print(f"- VI重建结果: {output_dirs['vi_recon']}")
     print(f"- 融合结果: {output_dirs['fusion']}")
     print(f"- 对比可视化: {output_dirs['comparison']}")
 
 
 if __name__ == '__main__':
-    main() 
+    main()

@@ -381,7 +381,7 @@ def train_one_epoch_dual(model, optimizer, data_loader, device, epoch, num_class
                             lr=lr)
         
         # Save visualization every 100 steps
-        if step % 10 == 0:
+        if step % 100 == 0:
             with torch.no_grad():
                 # Get IR and VI segmentation outputs
                 ir_seg_output = outputs['ir_seg']
