@@ -70,11 +70,16 @@ class PostdamDataset(Dataset):
         
         # Apply transforms if available
         if self.transforms is not None:
+            # 设置随机种子以确保IR和VI图像的翻转一致
+            random_state = np.random.get_state()
+            
             # Apply transforms to VI image and mask
             vi_img, mask = self.transforms(vi_img, mask)
             
             # Apply IR-specific transforms to IR image if available
             if self.ir_transforms is not None:
+                # 恢复相同的随机状态，确保翻转操作一致
+                np.random.set_state(random_state)
                 # Create a dummy mask for IR since transforms expect an image and mask pair
                 dummy_mask = Image.fromarray(np.zeros_like(np.array(ir_img)))
                 ir_img, _ = self.ir_transforms(ir_img, dummy_mask)

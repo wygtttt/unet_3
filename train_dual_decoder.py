@@ -275,11 +275,20 @@ def save_segmentation_visualization(images, masks, predictions, epoch, step, out
     
     # Iterate through images
     for i in range(num_images):
-        # Original image
-        img = images[i].detach().cpu().numpy().transpose(1, 2, 0)
+        # Original image - handle single channel images
+        img = images[i].detach().cpu().numpy()
+        if img.shape[0] == 1:  # Single channel image (IR or VI Y channel)
+            img = img.squeeze(0)  # Remove channel dimension
+        else:  # Multi-channel image
+            img = img.transpose(1, 2, 0)
+
+        # Handle case where image has shape (H, W, 1)
+        if len(img.shape) == 3 and img.shape[2] == 1:
+            img = img.squeeze(2)  # Remove last dimension if it's 1
+        
         # Normalize for display
         img = (img - img.min()) / (img.max() - img.min())
-        axes[i, 0].imshow(img)
+        axes[i, 0].imshow(img, cmap='gray' if len(img.shape) == 2 else None)
         axes[i, 0].set_title('Input Image')
         axes[i, 0].axis('off')
         
@@ -372,7 +381,7 @@ def train_one_epoch_dual(model, optimizer, data_loader, device, epoch, num_class
                             lr=lr)
         
         # Save visualization every 100 steps
-        if step % 100 == 0:
+        if step % 10 == 0:
             with torch.no_grad():
                 # Get IR and VI segmentation outputs
                 ir_seg_output = outputs['ir_seg']

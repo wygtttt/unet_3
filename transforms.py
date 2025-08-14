@@ -49,7 +49,7 @@ class RandomHorizontalFlip(object):
         self.flip_prob = flip_prob
 
     def __call__(self, image, target):
-        if random.random() < self.flip_prob:
+        if np.random.random() < self.flip_prob:
             image = F.hflip(image)
             target = F.hflip(target)
         return image, target
@@ -60,7 +60,7 @@ class RandomVerticalFlip(object):
         self.flip_prob = flip_prob
 
     def __call__(self, image, target):
-        if random.random() < self.flip_prob:
+        if np.random.random() < self.flip_prob:
             image = F.vflip(image)
             target = F.vflip(target)
         return image, target
