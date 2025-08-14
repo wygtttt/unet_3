@@ -97,51 +97,77 @@ def create_model(num_classes):
 
 def criterion(outputs, targets, num_classes, fusion_loss_fn):
     """
-    Combined loss function for segmentation and fusion tasks
+    Combined loss function for dual encoder architecture with fusion
     Args:
-        outputs: Dictionary containing 'seg' and 'fusion' outputs
+        outputs: Dictionary containing 'ir_seg', 'ir_recon', 'vi_seg', 'vi_recon', 'fusion' outputs
         targets: Tuple of (ir_images, vi_images, masks, fusion_targets)
         num_classes: Number of segmentation classes
         fusion_loss_fn: Fusion loss function (combination of L1 and SSIM)
     Returns:
-        Combined loss (segmentation loss + fusion loss)
+        Combined loss (segmentation losses + reconstruction losses + fusion loss)
     """
     ir_imgs, vi_imgs, masks, fusion_targets = targets
     
-    # Segmentation loss (cross entropy + dice)
-    seg_outputs = outputs['seg']
-    segmentation_loss = torch.nn.functional.cross_entropy(
-        seg_outputs, masks, ignore_index=255
+    # IR Segmentation loss (cross entropy + dice)
+    ir_seg_outputs = outputs['ir_seg']
+    ir_seg_loss = torch.nn.functional.cross_entropy(
+        ir_seg_outputs, masks, ignore_index=255
     )
     
-    # Add dice loss if needed for segmentation
+    # Add dice loss for IR segmentation
     from train_utils.dice_coefficient_loss import dice_loss, build_target
     dice_target = build_target(masks, num_classes, ignore_index=255)
-    segmentation_loss += dice_loss(seg_outputs, dice_target, multiclass=True, ignore_index=255)
+    ir_seg_loss += dice_loss(ir_seg_outputs, dice_target, multiclass=True, ignore_index=255)
+    
+    # VI Segmentation loss (cross entropy + dice)
+    vi_seg_outputs = outputs['vi_seg']
+    vi_seg_loss = torch.nn.functional.cross_entropy(
+        vi_seg_outputs, masks, ignore_index=255
+    )
+    vi_seg_loss += dice_loss(vi_seg_outputs, dice_target, multiclass=True, ignore_index=255)
+    
+    # IR Reconstruction loss
+    ir_recon_outputs = outputs['ir_recon']
+    ir_recon_loss = fusion_loss_fn(ir_recon_outputs, ir_imgs)
+    
+    # VI Reconstruction loss
+    vi_recon_outputs = outputs['vi_recon']
+    vi_recon_loss = fusion_loss_fn(vi_recon_outputs, vi_imgs)
     
     # Fusion loss
     fusion_outputs = outputs['fusion']
     fusion_loss = fusion_loss_fn(fusion_outputs, fusion_targets)
     
     # Combined loss (you can adjust weights as needed)
-    total_loss = segmentation_loss + fusion_loss
+    total_loss = ir_seg_loss + vi_seg_loss + ir_recon_loss + vi_recon_loss + fusion_loss
     
     return {
         'total': total_loss,
-        'seg': segmentation_loss,
+        'ir_seg': ir_seg_loss,
+        'vi_seg': vi_seg_loss,
+        'ir_recon': ir_recon_loss,
+        'vi_recon': vi_recon_loss,
         'fusion': fusion_loss
     }
 
 
 def evaluate_model(model, data_loader, device, num_classes, fusion_loss_fn):
     model.eval()
-    confmat = utils.ConfusionMatrix(num_classes)
-    dice = utils.DiceCoefficient(num_classes=num_classes, ignore_index=255)
+    ir_confmat = utils.ConfusionMatrix(num_classes)
+    vi_confmat = utils.ConfusionMatrix(num_classes)
+    ir_dice = utils.DiceCoefficient(num_classes=num_classes, ignore_index=255)
+    vi_dice = utils.DiceCoefficient(num_classes=num_classes, ignore_index=255)
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Test:'
+    total_ir_recon_loss = 0.0
+    total_vi_recon_loss = 0.0
+    total_ir_ssim = 0.0
+    total_vi_ssim = 0.0
+    total_ir_l1 = 0.0
+    total_vi_l1 = 0.0
     total_fusion_loss = 0.0
-    total_ssim = 0.0
-    total_l1_loss = 0.0
+    total_fusion_ssim = 0.0
+    total_fusion_l1 = 0.0
     samples = 0
     
     with torch.no_grad():
@@ -150,37 +176,66 @@ def evaluate_model(model, data_loader, device, num_classes, fusion_loss_fn):
             masks, fusion_targets = masks.to(device), fusion_targets.to(device)
             
             outputs = model(ir_imgs, vi_imgs)
-            seg_output = outputs['seg']
+            ir_seg_output = outputs['ir_seg']
+            vi_seg_output = outputs['vi_seg']
+            ir_recon_output = outputs['ir_recon']
+            vi_recon_output = outputs['vi_recon']
             fusion_output = outputs['fusion']
             
-            # Update segmentation metrics
-            confmat.update(masks.flatten(), seg_output.argmax(1).flatten())
-            dice.update(seg_output, masks)
+            # Update segmentation metrics for IR
+            ir_confmat.update(masks.flatten(), ir_seg_output.argmax(1).flatten())
+            ir_dice.update(ir_seg_output, masks)
+            
+            # Update segmentation metrics for VI
+            vi_confmat.update(masks.flatten(), vi_seg_output.argmax(1).flatten())
+            vi_dice.update(vi_seg_output, masks)
+            
+            # 计算IR重建指标
+            ir_recon_loss = fusion_loss_fn(ir_recon_output, ir_imgs)
+            ir_ssim_value = fusion_loss_fn.ssim_loss(ir_recon_output, ir_imgs)
+            ir_l1_loss = fusion_loss_fn.l1_loss(ir_recon_output, ir_imgs)
+            
+            # 计算VI重建指标
+            vi_recon_loss = fusion_loss_fn(vi_recon_output, vi_imgs)
+            vi_ssim_value = fusion_loss_fn.ssim_loss(vi_recon_output, vi_imgs)
+            vi_l1_loss = fusion_loss_fn.l1_loss(vi_recon_output, vi_imgs)
             
             # 计算融合指标
             fusion_loss = fusion_loss_fn(fusion_output, fusion_targets)
-            
-            # 计算SSIM值 (SSIM接近1表示相似度高)
-            ssim_value = fusion_loss_fn.ssim_loss(fusion_output, fusion_targets)
-            
-            # 计算L1损失
-            l1_loss = fusion_loss_fn.l1_loss(fusion_output, fusion_targets)
+            fusion_ssim_value = fusion_loss_fn.ssim_loss(fusion_output, fusion_targets)
+            fusion_l1_loss = fusion_loss_fn.l1_loss(fusion_output, fusion_targets)
             
             # 累加指标
+            total_ir_recon_loss += ir_recon_loss.item() * ir_imgs.size(0)
+            total_vi_recon_loss += vi_recon_loss.item() * ir_imgs.size(0)
+            total_ir_ssim += ir_ssim_value.item() * ir_imgs.size(0)
+            total_vi_ssim += vi_ssim_value.item() * ir_imgs.size(0)
+            total_ir_l1 += ir_l1_loss.item() * ir_imgs.size(0)
+            total_vi_l1 += vi_l1_loss.item() * ir_imgs.size(0)
             total_fusion_loss += fusion_loss.item() * ir_imgs.size(0)
-            total_ssim += ssim_value.item() * ir_imgs.size(0)
-            total_l1_loss += l1_loss.item() * ir_imgs.size(0)
+            total_fusion_ssim += fusion_ssim_value.item() * ir_imgs.size(0)
+            total_fusion_l1 += fusion_l1_loss.item() * ir_imgs.size(0)
             samples += ir_imgs.size(0)
 
-        confmat.reduce_from_all_processes()
-        dice.reduce_from_all_processes()
+        ir_confmat.reduce_from_all_processes()
+        vi_confmat.reduce_from_all_processes()
+        ir_dice.reduce_from_all_processes()
+        vi_dice.reduce_from_all_processes()
         
         # 计算平均值
+        avg_ir_recon_loss = total_ir_recon_loss / samples
+        avg_vi_recon_loss = total_vi_recon_loss / samples
+        avg_ir_ssim = total_ir_ssim / samples
+        avg_vi_ssim = total_vi_ssim / samples
+        avg_ir_l1 = total_ir_l1 / samples
+        avg_vi_l1 = total_vi_l1 / samples
         avg_fusion_loss = total_fusion_loss / samples
-        avg_ssim = total_ssim / samples
-        avg_l1_loss = total_l1_loss / samples
+        avg_fusion_ssim = total_fusion_ssim / samples
+        avg_fusion_l1 = total_fusion_l1 / samples
 
-    return confmat, dice.value.item(), avg_fusion_loss, avg_ssim, avg_l1_loss
+    return (ir_confmat, vi_confmat, ir_dice.value.item(), vi_dice.value.item(), 
+            avg_ir_recon_loss, avg_vi_recon_loss, avg_ir_ssim, avg_vi_ssim, 
+            avg_ir_l1, avg_vi_l1, avg_fusion_loss, avg_fusion_ssim, avg_fusion_l1)
 
 
 def save_segmentation_visualization(images, masks, predictions, epoch, step, output_dir):
@@ -268,7 +323,10 @@ def train_one_epoch_dual(model, optimizer, data_loader, device, epoch, num_class
     model.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
-    metric_logger.add_meter('seg_loss', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
+    metric_logger.add_meter('ir_seg_loss', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
+    metric_logger.add_meter('vi_seg_loss', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
+    metric_logger.add_meter('ir_recon_loss', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
+    metric_logger.add_meter('vi_recon_loss', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
     metric_logger.add_meter('fusion_loss', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
     header = 'Epoch: [{}]'.format(epoch)
 
@@ -306,25 +364,38 @@ def train_one_epoch_dual(model, optimizer, data_loader, device, epoch, num_class
 
         lr = optimizer.param_groups[0]["lr"]
         metric_logger.update(loss=loss.item(), 
-                            seg_loss=losses['seg'].item(),
+                            ir_seg_loss=losses['ir_seg'].item(),
+                            vi_seg_loss=losses['vi_seg'].item(),
+                            ir_recon_loss=losses['ir_recon'].item(),
+                            vi_recon_loss=losses['vi_recon'].item(),
                             fusion_loss=losses['fusion'].item(),
                             lr=lr)
         
         # Save visualization every 100 steps
         if step % 100 == 0:
             with torch.no_grad():
-                # Get segmentation outputs
-                seg_output = outputs['seg']
+                # Get IR and VI segmentation outputs
+                ir_seg_output = outputs['ir_seg']
+                vi_seg_output = outputs['vi_seg']
                 
-                # Save visualization
+                # Save IR segmentation visualization
                 save_segmentation_visualization(
-                    vi_imgs, masks, seg_output, 
-                    epoch, step, vis_dir
+                    ir_imgs, masks, ir_seg_output, 
+                    epoch, step, vis_dir + '_ir'
                 )
-                print(f"Saved segmentation visualization at epoch {epoch}, step {step}")
+                
+                # Save VI segmentation visualization
+                save_segmentation_visualization(
+                    vi_imgs, masks, vi_seg_output, 
+                    epoch, step, vis_dir + '_vi'
+                )
+                print(f"Saved segmentation visualizations at epoch {epoch}, step {step}")
 
     return (metric_logger.meters["loss"].global_avg, 
-            metric_logger.meters["seg_loss"].global_avg,
+            metric_logger.meters["ir_seg_loss"].global_avg,
+            metric_logger.meters["vi_seg_loss"].global_avg,
+            metric_logger.meters["ir_recon_loss"].global_avg,
+            metric_logger.meters["vi_recon_loss"].global_avg,
             metric_logger.meters["fusion_loss"].global_avg, 
             lr)
 
@@ -337,9 +408,9 @@ def main(args):
     num_classes = args.num_classes
 
     # Computed mean and std for normalization
-    # RGB mean and std for VI images
-    vi_mean = (0.3405778515395395, 0.3637113326614421, 0.33767444875971564)
-    vi_std = (0.14075637061449023, 0.13888050726764334, 0.14433405425755172)
+    # Y channel (luminance) mean and std for VI images
+    vi_mean = (0.5,)  # Y channel typical normalization value
+    vi_std = (0.5,)   # Y channel typical normalization value
     
     # Single channel mean and std for IR images
     ir_mean = (0.38396125844223883,)
@@ -406,44 +477,60 @@ def main(args):
     best_dice = 0.
     start_time = time.time()
     for epoch in range(args.start_epoch, args.epochs):
-        total_loss, seg_loss, fusion_loss, lr = train_one_epoch_dual(
+        total_loss, ir_seg_loss, vi_seg_loss, ir_recon_loss, vi_recon_loss, fusion_loss, lr = train_one_epoch_dual(
             model, optimizer, train_loader, device, epoch, num_classes,
             lr_scheduler=lr_scheduler, fusion_loss_fn=fusion_loss_fn, 
             print_freq=args.print_freq, scaler=scaler, vis_dir=vis_dir
         )
 
-        # 更新评估函数调用，获取SSIM和L1损失
-        confmat, dice, val_fusion_loss, val_ssim, val_l1_loss = evaluate_model(
+        # 更新评估函数调用，获取双编码器的所有指标
+        (ir_confmat, vi_confmat, ir_dice, vi_dice, 
+         val_ir_recon_loss, val_vi_recon_loss, val_ir_ssim, val_vi_ssim, 
+         val_ir_l1, val_vi_l1, val_fusion_loss, val_fusion_ssim, val_fusion_l1) = evaluate_model(
             model, val_loader, device=device, num_classes=num_classes,
             fusion_loss_fn=fusion_loss_fn
         )
         
-        val_info = str(confmat)
-        print(val_info)
-        print(f"Dice coefficient: {dice:.3f}")
-        print(f"Validation fusion loss: {val_fusion_loss:.4f}")
+        ir_val_info = "IR Segmentation:\n" + str(ir_confmat)
+        vi_val_info = "VI Segmentation:\n" + str(vi_confmat)
+        print(ir_val_info)
+        print(vi_val_info)
+        print(f"IR Dice coefficient: {ir_dice:.3f}")
+        print(f"VI Dice coefficient: {vi_dice:.3f}")
         
-        # 打印融合解码器的SSIM和L1指标
-        print(f"Fusion Decoder - SSIM: {val_ssim:.4f} (higher is better)")
-        print(f"Fusion Decoder - L1 Loss: {val_l1_loss:.4f} (lower is better)")
+        # 打印重建解码器的指标
+        print(f"IR Reconstruction - SSIM: {val_ir_ssim:.4f}, L1 Loss: {val_ir_l1:.4f}")
+        print(f"VI Reconstruction - SSIM: {val_vi_ssim:.4f}, L1 Loss: {val_vi_l1:.4f}")
+        print(f"Fusion - SSIM: {val_fusion_ssim:.4f}, L1 Loss: {val_fusion_l1:.4f}")
         
         # Write to results file
         with open(results_file, "a") as f:
             train_info = f"[epoch: {epoch}]\n" \
                          f"train_loss: {total_loss:.4f}\n" \
-                         f"seg_loss: {seg_loss:.4f}\n" \
+                         f"ir_seg_loss: {ir_seg_loss:.4f}\n" \
+                         f"vi_seg_loss: {vi_seg_loss:.4f}\n" \
+                         f"ir_recon_loss: {ir_recon_loss:.4f}\n" \
+                         f"vi_recon_loss: {vi_recon_loss:.4f}\n" \
                          f"fusion_loss: {fusion_loss:.4f}\n" \
                          f"lr: {lr:.6f}\n" \
-                         f"dice coefficient: {dice:.3f}\n" \
+                         f"ir_dice: {ir_dice:.3f}\n" \
+                         f"vi_dice: {vi_dice:.3f}\n" \
+                         f"val_ir_recon_loss: {val_ir_recon_loss:.4f}\n" \
+                         f"val_vi_recon_loss: {val_vi_recon_loss:.4f}\n" \
+                         f"val_ir_ssim: {val_ir_ssim:.4f}\n" \
+                         f"val_vi_ssim: {val_vi_ssim:.4f}\n" \
+                         f"val_ir_l1: {val_ir_l1:.4f}\n" \
+                         f"val_vi_l1: {val_vi_l1:.4f}\n" \
                          f"val_fusion_loss: {val_fusion_loss:.4f}\n" \
-                         f"val_ssim: {val_ssim:.4f}\n" \
-                         f"val_l1_loss: {val_l1_loss:.4f}\n"
-            f.write(train_info + val_info + "\n\n")
+                         f"val_fusion_ssim: {val_fusion_ssim:.4f}\n" \
+                         f"val_fusion_l1: {val_fusion_l1:.4f}\n"
+            f.write(train_info + ir_val_info + "\n" + vi_val_info + "\n\n")
 
-        # Save best model
+        # Save best model (using average of IR and VI dice)
+        avg_dice = (ir_dice + vi_dice) / 2
         if args.save_best is True:
-            if best_dice < dice:
-                best_dice = dice
+            if best_dice < avg_dice:
+                best_dice = avg_dice
             else:
                 continue
 
@@ -505,4 +592,4 @@ if __name__ == '__main__':
     if not os.path.exists("./save_weights"):
         os.mkdir("./save_weights")
 
-    main(args) 
+    main(args)

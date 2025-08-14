@@ -2,6 +2,7 @@ import os
 from PIL import Image
 import numpy as np
 import torch
+import torchvision
 from torch.utils.data import Dataset
 
 
@@ -58,8 +59,11 @@ class PostdamDataset(Dataset):
         # Load IR image (single channel)
         ir_img = Image.open(self.ir_img_list[idx]).convert('L')
         
-        # Load VI image (3 channels)
+        # Load VI image and extract Y channel (luminance) from YCbCr
         vi_img = Image.open(self.vi_img_list[idx]).convert('RGB')
+        vi_img = vi_img.convert('YCbCr')
+        # Extract only Y channel (luminance)
+        vi_img = vi_img.split()[0]  # Get Y channel only
         
         # Load mask - 直接加载，保持原始类别值（0-5）
         mask = Image.open(self.mask_img_list[idx]).convert('L')
@@ -120,4 +124,4 @@ def cat_list(images, fill_value=0):
     batched_imgs = images[0].new(*batch_shape).fill_(fill_value)
     for img, pad_img in zip(images, batched_imgs):
         pad_img[..., :img.shape[-2], :img.shape[-1]].copy_(img)
-    return batched_imgs 
+    return batched_imgs
