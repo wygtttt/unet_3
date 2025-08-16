@@ -238,6 +238,110 @@ def evaluate_model(model, data_loader, device, num_classes, fusion_loss_fn):
             avg_ir_l1, avg_vi_l1, avg_fusion_loss, avg_fusion_ssim, avg_fusion_l1)
 
 
+def save_fusion_visualization(ir_images, vi_images, fusion_targets, fusion_outputs, epoch, step, output_dir):
+    """
+    Save visualization of fusion results.
+    
+    Args:
+        ir_images: Input IR images (B, C, H, W)
+        vi_images: Input VI images (B, C, H, W)
+        fusion_targets: Ground truth fusion targets (B, C, H, W)
+        fusion_outputs: Model fusion outputs (B, C, H, W)
+        epoch: Current epoch
+        step: Current step
+        output_dir: Directory to save visualizations
+    """
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    # Take only the first few images in the batch to visualize
+    num_images = min(4, ir_images.shape[0])
+    
+    # Create a figure with subplots
+    fig, axes = plt.subplots(num_images, 4, figsize=(20, 5 * num_images))
+    
+    # If there's only one image, make sure axes is 2D
+    if num_images == 1:
+        axes = axes.reshape(1, -1)
+    
+    # Iterate through images
+    for i in range(num_images):
+        # IR image - handle single channel
+        ir_img = ir_images[i].detach().cpu().numpy()
+        if ir_img.shape[0] == 1:  # Single channel image
+            ir_img = ir_img.squeeze(0)  # Remove channel dimension
+        else:  # Multi-channel image
+            ir_img = ir_img.transpose(1, 2, 0)
+
+        # Handle case where image has shape (H, W, 1)
+        if len(ir_img.shape) == 3 and ir_img.shape[2] == 1:
+            ir_img = ir_img.squeeze(2)  # Remove last dimension if it's 1
+        
+        # Normalize for display
+        ir_img = (ir_img - ir_img.min()) / (ir_img.max() - ir_img.min())
+        axes[i, 0].imshow(ir_img, cmap='gray' if len(ir_img.shape) == 2 else None)
+        axes[i, 0].set_title('IR Image')
+        axes[i, 0].axis('off')
+        
+        # VI image - handle single channel
+        vi_img = vi_images[i].detach().cpu().numpy()
+        if vi_img.shape[0] == 1:  # Single channel image
+            vi_img = vi_img.squeeze(0)  # Remove channel dimension
+        else:  # Multi-channel image
+            vi_img = vi_img.transpose(1, 2, 0)
+
+        # Handle case where image has shape (H, W, 1)
+        if len(vi_img.shape) == 3 and vi_img.shape[2] == 1:
+            vi_img = vi_img.squeeze(2)  # Remove last dimension if it's 1
+        
+        # Normalize for display
+        vi_img = (vi_img - vi_img.min()) / (vi_img.max() - vi_img.min())
+        axes[i, 1].imshow(vi_img, cmap='gray' if len(vi_img.shape) == 2 else None)
+        axes[i, 1].set_title('VI Image')
+        axes[i, 1].axis('off')
+        
+        # Fusion target - compute maximum of IR and VI images
+        # Since both IR and VI use the same normalization (mean=0.5, std=0.5),
+        # we can directly take the maximum without denormalization
+        fusion_target =fusion_targets[i].detach().cpu().numpy()
+        if fusion_target.shape[0] == 1:  # Single channel image
+            fusion_target = fusion_target.squeeze(0)  # Remove channel dimension
+        else:  # Multi-channel image
+            fusion_target = fusion_target.transpose(1, 2, 0)
+
+        # Handle case where image has shape (H, W, 1)
+        if len(fusion_target.shape) == 3 and fusion_target.shape[2] == 1:
+            fusion_target = fusion_target.squeeze(2)  # Remove last dimension if it's 1
+        
+        # Normalize for display
+        fusion_target = (fusion_target - fusion_target.min()) / (fusion_target.max() - fusion_target.min())
+        axes[i, 2].imshow(fusion_target, cmap='gray' if len(fusion_target.shape) == 2 else None)
+        axes[i, 2].set_title('Fusion Target (Max of IR & VI)')
+        axes[i, 2].axis('off')
+        
+        # Fusion output - handle single channel
+        fusion_output = fusion_outputs[i].detach().cpu().numpy()
+        if fusion_output.shape[0] == 1:  # Single channel image
+            fusion_output = fusion_output.squeeze(0)  # Remove channel dimension
+        else:  # Multi-channel image
+            fusion_output = fusion_output.transpose(1, 2, 0)
+
+        # Handle case where image has shape (H, W, 1)
+        if len(fusion_output.shape) == 3 and fusion_output.shape[2] == 1:
+            fusion_output = fusion_output.squeeze(2)  # Remove last dimension if it's 1
+        
+        # Normalize for display
+        fusion_output = (fusion_output - fusion_output.min()) / (fusion_output.max() - fusion_output.min())
+        axes[i, 3].imshow(fusion_output, cmap='gray' if len(fusion_output.shape) == 2 else None)
+        axes[i, 3].set_title('Fusion Output')
+        axes[i, 3].axis('off')
+    
+    # Adjust layout and save
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f'fusion_epoch{epoch}_step{step}.png'))
+    plt.close()
+
+
 def save_segmentation_visualization(images, masks, predictions, epoch, step, output_dir):
     """
     Save visualization of segmentation results.
@@ -386,6 +490,7 @@ def train_one_epoch_dual(model, optimizer, data_loader, device, epoch, num_class
                 # Get IR and VI segmentation outputs
                 ir_seg_output = outputs['ir_seg']
                 vi_seg_output = outputs['vi_seg']
+                fusion_output = outputs['fusion']
                 
                 # Save IR segmentation visualization
                 save_segmentation_visualization(
@@ -398,7 +503,14 @@ def train_one_epoch_dual(model, optimizer, data_loader, device, epoch, num_class
                     vi_imgs, masks, vi_seg_output, 
                     epoch, step, vis_dir + '_vi'
                 )
-                print(f"Saved segmentation visualizations at epoch {epoch}, step {step}")
+                
+                # Save fusion visualization
+                save_fusion_visualization(
+                    ir_imgs, vi_imgs, fusion_targets, fusion_output,
+                    epoch, step, vis_dir + '_fusion'
+                )
+                
+                print(f"Saved segmentation and fusion visualizations at epoch {epoch}, step {step}")
 
     return (metric_logger.meters["loss"].global_avg, 
             metric_logger.meters["ir_seg_loss"].global_avg,
@@ -418,8 +530,8 @@ def main(args):
 
     # Computed mean and std for normalization
     # Y channel (luminance) mean and std for VI images
-    vi_mean = (0.5,)  # Y channel typical normalization value
-    vi_std = (0.5,)   # Y channel typical normalization value
+    vi_mean = (0.38396125844223883,)  # Y channel typical normalization value
+    vi_std = (0.14174455530391647,)  # Y channel typical normalization value
     
     # Single channel mean and std for IR images
     ir_mean = (0.38396125844223883,)
