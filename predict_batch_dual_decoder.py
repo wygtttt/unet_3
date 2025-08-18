@@ -8,6 +8,7 @@ from torchvision import transforms
 from tqdm import tqdm
 
 from src import DualDecoderUNet
+from Evaluator.Evaluator import Evaluator
 
 
 def time_synchronized():
@@ -184,8 +185,8 @@ def process_batch(model, data_root, output_dir, device):
     ir_files = sorted([f for f in os.listdir(ir_dir) if f.endswith(('.jpg', '.jpeg', '.png', '.tif'))])
     
     # 使用训练时计算的均值和标准差
-    vi_mean = (0.5,)  # Y channel typical normalization value
-    vi_std = (0.5,)   # Y channel typical normalization value
+    vi_mean = (0.38396125844223883,)  # Y channel typical normalization value
+    vi_std = (0.14174455530391647,)   # Y channel typical normalization value
     ir_mean = (0.38396125844223883,)
     ir_std = (0.14174455530391647,)
     
@@ -203,6 +204,7 @@ def process_batch(model, data_root, output_dir, device):
     # 批量处理图像
     total_time = 0
     num_images = len(ir_files)
+    scd_scores = []  # 存储SCD指标
     
     for i, ir_file in enumerate(tqdm(ir_files, desc="处理测试图像")):
         # 文件名（不含扩展名）
@@ -220,8 +222,10 @@ def process_batch(model, data_root, output_dir, device):
         
         # 加载图像
         ir_img = Image.open(ir_path).convert('L')
-        vi_img = Image.open(vi_path).convert('L')  # VI也转换为灰度图像，因为模型期望1通道输入
-        
+        vi_img = Image.open(vi_path).convert('RGB')  # VI也转换为灰度图像，因为模型期望1通道输入
+        vi_img = vi_img.convert('YCbCr')
+        # Extract only Y channel (luminance)
+        vi_img = vi_img.split()[0]  # Get Y channel only
         # 加载ground truth掩码（如果存在）
         if os.path.exists(mask_path):
             gt_mask = np.array(Image.open(mask_path).convert('L'))
@@ -287,6 +291,18 @@ def process_batch(model, data_root, output_dir, device):
         fusion_img = fusion_img.astype(np.uint8)
         Image.fromarray(fusion_img).save(os.path.join(output_dirs['fusion'], f"{file_base}_fusion.png"))
         
+        # 计算SCD指标
+        # 将原始图像转换为numpy数组用于SCD计算
+        ir_img_array = np.array(ir_img, dtype=np.float32)
+        vi_img_array = np.array(vi_img, dtype=np.float32)
+        fusion_img_float = fusion_img.astype(np.float32)
+        
+        # 计算SCD指标
+        scd_score = Evaluator.SCD(fusion_img_float, ir_img_array, vi_img_array)
+        scd_scores.append(scd_score)
+        
+        print(f"图像 {file_base}: SCD = {scd_score:.4f}")
+        
         # 保存对比可视化
         visualize_comparison(vi_tensor[0].cpu(), ir_tensor[0].cpu(), gt_mask, ir_seg_pred, vi_seg_pred,
                            ir_recon_output[0], vi_recon_output[0], fusion_output[0], 
@@ -295,6 +311,37 @@ def process_batch(model, data_root, output_dir, device):
     # 打印平均推理时间
     avg_time = total_time / num_images
     print(f"平均推理时间: {avg_time:.4f}秒/图像")
+    
+    # 计算并打印SCD指标统计信息
+    if scd_scores:
+        avg_scd = np.mean(scd_scores)
+        max_scd = np.max(scd_scores)
+        min_scd = np.min(scd_scores)
+        std_scd = np.std(scd_scores)
+        
+        print("\n=== SCD指标统计 ===")
+        print(f"平均SCD: {avg_scd:.4f}")
+        print(f"最大SCD: {max_scd:.4f}")
+        print(f"最小SCD: {min_scd:.4f}")
+        print(f"标准差: {std_scd:.4f}")
+        print(f"处理图像数量: {len(scd_scores)}")
+        
+        # 保存SCD结果到文件
+        scd_results_path = os.path.join(output_dir, 'scd_results.txt')
+        with open(scd_results_path, 'w', encoding='utf-8') as f:
+            f.write("SCD指标计算结果\n")
+            f.write("=" * 50 + "\n")
+            f.write(f"平均SCD: {avg_scd:.4f}\n")
+            f.write(f"最大SCD: {max_scd:.4f}\n")
+            f.write(f"最小SCD: {min_scd:.4f}\n")
+            f.write(f"标准差: {std_scd:.4f}\n")
+            f.write(f"处理图像数量: {len(scd_scores)}\n\n")
+            f.write("各图像详细结果:\n")
+            for i, (ir_file, scd) in enumerate(zip(ir_files[:len(scd_scores)], scd_scores)):
+                file_base = os.path.splitext(ir_file)[0]
+                f.write(f"{i+1:3d}. {file_base}: {scd:.4f}\n")
+        
+        print(f"SCD结果已保存到: {scd_results_path}")
     
     return output_dirs
 
@@ -332,6 +379,7 @@ def main():
     print(f"- VI重建结果: {output_dirs['vi_recon']}")
     print(f"- 融合结果: {output_dirs['fusion']}")
     print(f"- 对比可视化: {output_dirs['comparison']}")
+    print(f"- SCD指标结果: {os.path.join(output_dir, 'scd_results.txt')}")
 
 
 if __name__ == '__main__':
