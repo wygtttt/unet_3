@@ -132,4 +132,35 @@ class FusionLoss(nn.Module):
         l1_loss = self.l1_loss(pred, target)
         
         # Combine losses with weights
-        return self.ssim_weight * ssim_loss + self.l1_weight * l1_loss 
+        return self.ssim_weight * ssim_loss + self.l1_weight * l1_loss
+
+
+class FusionLossSSIMMSE(nn.Module):
+    def __init__(self, ssim_weight=0.5, mse_weight=0.5):
+        """
+        Fusion loss combining SSIM and MSE loss
+        Args:
+            ssim_weight: Weight for SSIM loss (higher values focus more on structural similarity)
+            mse_weight: Weight for MSE loss (higher values focus more on squared pixel differences)
+        """
+        super(FusionLossSSIMMSE, self).__init__()
+        self.ssim_loss = SSIM(window_size=11, size_average=True)
+        self.mse_loss = nn.MSELoss()
+        self.ssim_weight = ssim_weight
+        self.mse_weight = mse_weight
+
+    def forward(self, pred, target):
+        """
+        Calculate the fusion loss
+        Args:
+            pred: Predicted fusion image from the model
+            target: Target fusion image (max of IR and VI)
+        Returns:
+            Weighted loss combining SSIM and MSE loss
+        """
+        ssim_value = self.ssim_loss(pred, target)
+        ssim_loss = 1 - ssim_value  # Convert SSIM to a loss (0 is perfect, 1 is bad)
+        mse_loss = self.mse_loss(pred, target)
+        
+        # Combine losses with weights
+        return self.ssim_weight * ssim_loss + self.mse_weight * mse_loss

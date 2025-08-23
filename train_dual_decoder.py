@@ -12,6 +12,8 @@ from src import DualDecoderUNet
 from train_utils import train_one_epoch, evaluate, create_lr_scheduler, FusionLoss
 from potsdam_dataset import PostdamDataset
 import transforms as T
+from train_utils.fusion_loss import FusionLossSSIMMSE
+from train_utils.ssim_loss import SSIM
 
 
 class SegmentationPresetTrain:
@@ -94,6 +96,31 @@ def create_model(num_classes):
     model = DualDecoderUNet(num_classes=num_classes, base_c=32)
     return model
 
+import torch
+from torch import nn
+class GradientLoss(nn.Module):
+    def __init__(self):
+        super(GradientLoss, self).__init__()
+        self.l1_loss = nn.L1Loss()  # 可以使用其他类型的损失函数，比如MSELoss
+
+    def forward(self, input, target):
+        # 计算输入和目标在x和y方向上的梯度
+        input_grad_x = torch.abs(input[:, :, :, :-1] - input[:, :, :, 1:])
+        input_grad_y = torch.abs(input[:, :, :-1, :] - input[:, :, 1:, :])
+
+        target_grad_x = torch.abs(target[:, :, :, :-1] - target[:, :, :, 1:])
+        target_grad_y = torch.abs(target[:, :, :-1, :] - target[:, :, 1:, :])
+
+        # 计算梯度损失
+        grad_loss_x = self.l1_loss(input_grad_x, target_grad_x)
+        grad_loss_y = self.l1_loss(input_grad_y, target_grad_y)
+
+        # 返回总梯度损失
+        return grad_loss_x + grad_loss_y
+
+
+grad_loss_function = GradientLoss()
+mse_loss_function = nn.MSELoss()
 
 def criterion(outputs, targets, num_classes, fusion_loss_fn):
     """
@@ -135,8 +162,22 @@ def criterion(outputs, targets, num_classes, fusion_loss_fn):
     vi_recon_loss = fusion_loss_fn(vi_recon_outputs, vi_imgs)
     
     # Fusion loss
-    fusion_outputs = outputs['fusion']
-    fusion_loss = fusion_loss_fn(fusion_outputs, fusion_targets)
+    # fusion_outputs = outputs['fusion']
+    fusion_outputs = torch.sigmoid(outputs['fusion'])
+    x1 = torch.sigmoid(ir_imgs)
+    x2 = torch.sigmoid(vi_imgs)
+
+    # 分别计算 SSIM 损失
+    criterion_ssim = SSIM()
+    loss_ssim_x1 = criterion_ssim(fusion_outputs, x1)
+    loss_ssim_x2 = criterion_ssim(fusion_outputs, x2)
+    grad_loss_x1 = grad_loss_function(fusion_outputs, x1)
+    grad_loss_x2 = grad_loss_function(fusion_outputs, x2)
+
+    mse_loss_x1 = mse_loss_function(fusion_outputs, x1)
+    mse_loss_x2 = mse_loss_function(fusion_outputs, x2)
+    fusion_loss = loss_ssim_x1 + loss_ssim_x2 + grad_loss_x1 + grad_loss_x2 + mse_loss_x1 + mse_loss_x2
+    # fusion_loss = fusion_loss_fn(fusion_outputs, fusion_targets)
     
     # Combined loss (you can adjust weights as needed)
     total_loss = ir_seg_loss + vi_seg_loss + ir_recon_loss + vi_recon_loss + fusion_loss
@@ -163,11 +204,11 @@ def evaluate_model(model, data_loader, device, num_classes, fusion_loss_fn):
     total_vi_recon_loss = 0.0
     total_ir_ssim = 0.0
     total_vi_ssim = 0.0
-    total_ir_l1 = 0.0
-    total_vi_l1 = 0.0
+    total_ir_mse = 0.0
+    total_vi_mse = 0.0
     total_fusion_loss = 0.0
     total_fusion_ssim = 0.0
-    total_fusion_l1 = 0.0
+    total_fusion_mse = 0.0
     samples = 0
     
     with torch.no_grad():
@@ -193,28 +234,28 @@ def evaluate_model(model, data_loader, device, num_classes, fusion_loss_fn):
             # 计算IR重建指标
             ir_recon_loss = fusion_loss_fn(ir_recon_output, ir_imgs)
             ir_ssim_value = fusion_loss_fn.ssim_loss(ir_recon_output, ir_imgs)
-            ir_l1_loss = fusion_loss_fn.l1_loss(ir_recon_output, ir_imgs)
+            ir_mse_loss = fusion_loss_fn.mse_loss(ir_recon_output, ir_imgs)
             
             # 计算VI重建指标
             vi_recon_loss = fusion_loss_fn(vi_recon_output, vi_imgs)
             vi_ssim_value = fusion_loss_fn.ssim_loss(vi_recon_output, vi_imgs)
-            vi_l1_loss = fusion_loss_fn.l1_loss(vi_recon_output, vi_imgs)
+            vi_mse_loss = fusion_loss_fn.mse_loss(vi_recon_output, vi_imgs)
             
             # 计算融合指标
             fusion_loss = fusion_loss_fn(fusion_output, fusion_targets)
             fusion_ssim_value = fusion_loss_fn.ssim_loss(fusion_output, fusion_targets)
-            fusion_l1_loss = fusion_loss_fn.l1_loss(fusion_output, fusion_targets)
+            fusion_mse_loss = fusion_loss_fn.mse_loss(fusion_output, fusion_targets)
             
             # 累加指标
             total_ir_recon_loss += ir_recon_loss.item() * ir_imgs.size(0)
             total_vi_recon_loss += vi_recon_loss.item() * ir_imgs.size(0)
             total_ir_ssim += ir_ssim_value.item() * ir_imgs.size(0)
             total_vi_ssim += vi_ssim_value.item() * ir_imgs.size(0)
-            total_ir_l1 += ir_l1_loss.item() * ir_imgs.size(0)
-            total_vi_l1 += vi_l1_loss.item() * ir_imgs.size(0)
+            total_ir_mse += ir_mse_loss.item() * ir_imgs.size(0)
+            total_vi_mse += vi_mse_loss.item() * ir_imgs.size(0)
             total_fusion_loss += fusion_loss.item() * ir_imgs.size(0)
             total_fusion_ssim += fusion_ssim_value.item() * ir_imgs.size(0)
-            total_fusion_l1 += fusion_l1_loss.item() * ir_imgs.size(0)
+            total_fusion_mse += fusion_mse_loss.item() * ir_imgs.size(0)
             samples += ir_imgs.size(0)
 
         ir_confmat.reduce_from_all_processes()
@@ -227,15 +268,15 @@ def evaluate_model(model, data_loader, device, num_classes, fusion_loss_fn):
         avg_vi_recon_loss = total_vi_recon_loss / samples
         avg_ir_ssim = total_ir_ssim / samples
         avg_vi_ssim = total_vi_ssim / samples
-        avg_ir_l1 = total_ir_l1 / samples
-        avg_vi_l1 = total_vi_l1 / samples
+        avg_ir_mse = total_ir_mse / samples
+        avg_vi_mse = total_vi_mse / samples
         avg_fusion_loss = total_fusion_loss / samples
         avg_fusion_ssim = total_fusion_ssim / samples
-        avg_fusion_l1 = total_fusion_l1 / samples
+        avg_fusion_mse = total_fusion_mse / samples
 
     return (ir_confmat, vi_confmat, ir_dice.value.item(), vi_dice.value.item(), 
             avg_ir_recon_loss, avg_vi_recon_loss, avg_ir_ssim, avg_vi_ssim, 
-            avg_ir_l1, avg_vi_l1, avg_fusion_loss, avg_fusion_ssim, avg_fusion_l1)
+            avg_ir_mse, avg_vi_mse, avg_fusion_loss, avg_fusion_ssim, avg_fusion_mse)
 
 
 def save_fusion_visualization(ir_images, vi_images, fusion_targets, fusion_outputs, epoch, step, output_dir):
@@ -574,7 +615,7 @@ def main(args):
     )
 
     # Initialize fusion loss function
-    fusion_loss_fn = FusionLoss(ssim_weight=0.5, l1_weight=0.5)
+    fusion_loss_fn = FusionLossSSIMMSE(ssim_weight=0.5, mse_weight=0.5)
 
     scaler = torch.cuda.amp.GradScaler() if args.amp else None
 
@@ -620,9 +661,9 @@ def main(args):
         print(f"VI Dice coefficient: {vi_dice:.3f}")
         
         # 打印重建解码器的指标
-        print(f"IR Reconstruction - SSIM: {val_ir_ssim:.4f}, L1 Loss: {val_ir_l1:.4f}")
-        print(f"VI Reconstruction - SSIM: {val_vi_ssim:.4f}, L1 Loss: {val_vi_l1:.4f}")
-        print(f"Fusion - SSIM: {val_fusion_ssim:.4f}, L1 Loss: {val_fusion_l1:.4f}")
+        print(f"IR Reconstruction - SSIM: {val_ir_ssim:.4f}, MSE Loss: {val_ir_l1:.4f}")
+        print(f"VI Reconstruction - SSIM: {val_vi_ssim:.4f}, MSE Loss: {val_vi_l1:.4f}")
+        print(f"Fusion - SSIM: {val_fusion_ssim:.4f}, MSE Loss: {val_fusion_l1:.4f}")
         
         # Write to results file
         with open(results_file, "a") as f:
@@ -640,11 +681,11 @@ def main(args):
                          f"val_vi_recon_loss: {val_vi_recon_loss:.4f}\n" \
                          f"val_ir_ssim: {val_ir_ssim:.4f}\n" \
                          f"val_vi_ssim: {val_vi_ssim:.4f}\n" \
-                         f"val_ir_l1: {val_ir_l1:.4f}\n" \
-                         f"val_vi_l1: {val_vi_l1:.4f}\n" \
+                         f"val_ir_mse: {val_ir_l1:.4f}\n" \
+                         f"val_vi_mse: {val_vi_l1:.4f}\n" \
                          f"val_fusion_loss: {val_fusion_loss:.4f}\n" \
                          f"val_fusion_ssim: {val_fusion_ssim:.4f}\n" \
-                         f"val_fusion_l1: {val_fusion_l1:.4f}\n"
+                         f"val_fusion_mse: {val_fusion_l1:.4f}\n"
             f.write(train_info + ir_val_info + "\n" + vi_val_info + "\n\n")
 
         # Save best model (using average of IR and VI dice)
